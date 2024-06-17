@@ -81,6 +81,7 @@ private:
     int growthItemsConsumed;
     int poisonItemsConsumed;
     int gatesUsed;
+    bool alreadyUpdated;   // 추가한 변수 - 아이템 소모량 업데이트 여부를 체크하는 변수(이미 업데이트했다면 true)
 
     // ItemSpawner* _growthItemSpawner; // 성장 아이템 생성기 포인터
 
@@ -111,6 +112,7 @@ public:
 
         height = 0;
         width = 0;
+        alreadyUpdated = false;
         // 프리셋 1
         mapPresets.push_back("211111111111111111112\n"
                              "100000000000000000001\n"
@@ -288,6 +290,10 @@ public:
         wrefresh(win);        // Refresh the window
     }
 
+    void setAlreadyUpdate(bool state) {
+        alreadyUpdated = state;
+    }
+
     // 뱀의 초기 위치를 리턴 (머리부터 이어지는 3개의 순서쌍을 리턴)
     vector<Coordinate> getInitialSnakePosition() const {
         vector<Coordinate> snakePositions;
@@ -427,19 +433,23 @@ public:
                gatesUsed >= 3;
     }
     
-    //미션 갱신
-    void updateMissionStatus(int itemType) {
+    //미션 갱신 - 파라미터 타입 enum으로 변경함.
+    void updateMissionStatus(CellValue itemType) {
+        if (alreadyUpdated) return;  // 이미 업데이트 했다면 패스
         if (itemType == GROWTH_ITEM) {
             growthItemsConsumed++;
             currentLength++;
             if (currentLength > maxLength) {
                 maxLength = currentLength;
             }
+            alreadyUpdated = true;    
         } else if (itemType == POISON_ITEM) {
             poisonItemsConsumed++;
             currentLength--;
+            alreadyUpdated = true;
         } else if (itemType == GATE) {
             gatesUsed++;
+            alreadyUpdated = true;
         }
     }
 
@@ -488,6 +498,17 @@ private:
 
 public:
     GateSpawner(GameMap& gameMap) : _gameMap(gameMap) {
+        active = false;
+        wallPos = _gameMap.getWallPositions();
+        spawnCycle = 10;
+        countCycle = spawnCycle;
+        duration = 20;
+        countDuration = duration;
+        timeToUse = 0;
+        isOpen = false;
+    }
+
+    void resetForNewState() {      // 스테이지 변경 후 초기화
         active = false;
         wallPos = _gameMap.getWallPositions();
         spawnCycle = 10;
@@ -592,11 +613,19 @@ private:
     GameMap& gameMap; // GameMap 객체 참조
     GateSpawner& gateSpawner;   // 게이트 생성기 참조
     Direction curDirection; // 현재 이동방향
-    int lastConsumedItem; // 마지막 아이템
+    CellValue lastConsumedItem; // 마지막 아이템 - 타입 enum으로 바꿈.
 
 public:
     // 뱀의 초기 위치를 벡터로 받아 설정하는 생성자
     Snake(GameMap& gameMap, GateSpawner& gateSpawner) : gameMap(gameMap), gateSpawner(gateSpawner){
+        auto initialPositions = gameMap.getInitialSnakePosition();
+        for (const auto& pos : initialPositions) {
+            body.push_back(pos);
+        }
+    }
+
+    void resetForNewStage() {
+        body.clear();
         auto initialPositions = gameMap.getInitialSnakePosition();
         for (const auto& pos : initialPositions) {
             body.push_back(pos);
@@ -652,6 +681,10 @@ public:
             nextHead = getPosAfterGate(destination);
             body.push_front(nextHead);
             decreaseTail();
+
+            
+            lastConsumedItem = GATE; // lastConsumedItem 업데이트 - 추가한 부분
+            gameMap.setAlreadyUpdate(false);    // 추가한 부분
         }
         // 그 외(전진할 수 있을 때)
         else {
@@ -667,6 +700,10 @@ public:
             else if (cellValue == POISON_ITEM) {
                 decreaseTail();
                 decreaseTail();
+                gameMap.setAlreadyUpdate(false);    // 추가한 부분
+                lastConsumedItem = POISON_ITEM; // lastConsumedItem 업데이트 - 추가한 부분
+                
+
                 // 몸 길이가 3보다 작아지면 죽음.
                 if (body.size() < 3) {
                     dieAnimation();
@@ -675,7 +712,12 @@ public:
                     return true;
                 }
             } 
+
             // 성장 아이템 획득시엔 꼬리를 삭제하지 않음. 
+            else if (cellValue == GROWTH_ITEM) {
+                gameMap.setAlreadyUpdate(false);    // 추가한 부분
+                lastConsumedItem = GROWTH_ITEM; // lastConsumedItem 업데이트 - 추가한 부분
+            }
         }
         return false; // 게임 지속됨.
     }
@@ -785,7 +827,7 @@ public:
         }
     }
     
-    int getLastConsumedItem() const {
+    CellValue getLastConsumedItem() const { // 리턴 타입 enum으로 바꿈.
         return lastConsumedItem;
     }
 
@@ -808,6 +850,11 @@ public:
         this->countCycle = spawnCycle;
         this->active = false;
         itemLife = 20;
+    }
+
+    void resetForNewStage() {
+        active = false;
+        countCycle = spawnCycle;
     }
 
     // 활성화 여부 설정
@@ -878,6 +925,8 @@ void updateScoreBoard(WINDOW *scoreBoardWin, const GameMap &gameMap) {
     mvwprintw(scoreBoardWin, 10, 1, "-: 3 %s", gameMap.getPoisonItemsConsumed() >= 3 ? "(v)" : "( )");
     mvwprintw(scoreBoardWin, 11, 1, "G: 3 %s", gameMap.getGatesUsed() >= 3 ? "(v)" : "( )");
 
+    mvwprintw(scoreBoardWin, 12, 1, "Stage: %d", gameMap.getCurrentStage());
+
     wrefresh(scoreBoardWin);
 }
 
@@ -939,10 +988,14 @@ int main() {
         if (gameMap.checkMissionCompleted()) {
             int nextStage = gameMap.getCurrentStage() + 1;
             gameMap.resetForNewStage(nextStage);
+            // 모든 객체들의 멤버 변수들 리셋 추가함.
+            snake.resetForNewStage();
+            growthItemSpawner.resetForNewStage();
+            poisonItemSpawner.resetForNewStage();
         }
 
         updateScoreBoard(scoreBoardWin, gameMap);
-    }
+    }   
 
     delwin(gameWin);
     delwin(scoreBoardWin);
